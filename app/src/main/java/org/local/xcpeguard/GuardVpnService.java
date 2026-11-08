@@ -41,6 +41,7 @@ public final class GuardVpnService extends VpnService {
     public static final String KEY_DOMAINS = "domains";
     public static final String KEY_TOTAL = "dropped";
     public static final String KEY_BLOCKED_DNS = "blocked_dns";
+    public static final String KEY_ENABLED = "protection_enabled";
     public static volatile boolean active = false;
     private static final String CHANNEL = "xcpe_guard_status_v2";
     private ParcelFileDescriptor tun;
@@ -51,7 +52,22 @@ public final class GuardVpnService extends VpnService {
     private List<String> domainRules;
 
     @Override public synchronized int onStartCommand(Intent intent, int flags, int startId) {
+        // An explicit user stop must close the VPN interface immediately.
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(KEY_ENABLED, false).commit();
+            shutdownProtection();
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        // START_STICKY must not silently restart a VPN the user stopped.
+        // A null Intent is permitted only for an intentionally enabled
+        // Android always-on VPN restart, never after a user-requested stop.
+        boolean enabled = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_ENABLED, false);
+        boolean expectedAction = intent == null || ACTION_START.equals(intent.getAction());
+        if (!enabled || !expectedAction) {
+            shutdownProtection();
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -78,7 +94,7 @@ public final class GuardVpnService extends VpnService {
                 return START_NOT_STICKY;
             }
         }
-        return START_STICKY;
+        return START_NOT_STICKY;
     }
 
     private void createChannel() {
@@ -203,14 +219,26 @@ public final class GuardVpnService extends VpnService {
                 .putLong(KEY_BLOCKED_DNS, blockedDns).apply();
     }
 
-    @Override public synchronized void onDestroy() {
+    /** Release the TUN and foreground notification independent of the packet thread. */
+    private synchronized void shutdownProtection() {
         stopping = true;
         active = false;
         ParcelFileDescriptor fd = tun;
         tun = null;
         if (fd != null) try { fd.close(); } catch (IOException ignored) {}
+        stopForeground(STOP_FOREGROUND_REMOVE);
+    }
+
+    @Override public synchronized void onDestroy() {
+        shutdownProtection();
         super.onDestroy();
     }
-    @Override public void onRevoke() { stopSelf(); }
+
+    @Override public void onRevoke() {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putBoolean(KEY_ENABLED, false).apply();
+        shutdownProtection();
+        stopSelf();
+    }
     @Override public IBinder onBind(Intent intent) { return super.onBind(intent); }
 }
