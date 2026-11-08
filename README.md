@@ -1,4 +1,4 @@
-# XCPE Route Guard v0.2 — offline IP + DNS containment
+# XCPE Route Guard v0.2.1 — offline IP + DNS containment
 
 **Author: Nikaido Wei**
 
@@ -53,3 +53,11 @@ Do **not** add `github.com` to the DNS list just because Google's report identif
 6. If internet access breaks, use **Stop protection** and review the network's DNS configuration.
 
 The GitHub workflow performs source pattern checks, local rule/DNS unit tests, APK compilation, and an APK permission inspection. Those checks do not replace device testing, independent security assessment or a full firmware cleanup.
+
+## Stop protection reliably (v0.2.1)
+
+- Tap **Stop protection**. The app now calls Android `stopService()` directly rather than sending a new start command with a STOP action.
+- The service shuts down its TUN descriptor, removes the foreground notification and sets its in-process status to INACTIVE. The on-screen status automatically refreshes.
+- An explicit user-enabled flag guards against unwanted `START_STICKY` restarts; the service now returns `START_NOT_STICKY`.
+- If the device reactivates a VPN due to firmware-specific Always-on settings, go to Android **Settings → Network & Internet → VPN** and turn off Always-on VPN / disconnect. On stripped-down TV firmware, **Settings → Apps → XCPE Route Guard → Force Stop** will terminate the old service.
+- This version contains source-level lifecycle checks in the CI pipeline. Stopping/starting on the physical SVI 10P has not been verified in a hardware test.
