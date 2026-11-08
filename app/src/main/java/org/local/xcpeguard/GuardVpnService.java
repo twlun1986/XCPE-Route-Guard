@@ -185,7 +185,7 @@ public final class GuardVpnService extends VpnService {
             upstream.network.bindSocket(socket);
             socket.connect(upstream.dns, 53);
             socket.setSoTimeout(1500);
-            socket.send(new DatagramPacket(question, question.length));
+            socket.send(new DatagramPacket(question, question.length, upstream.dns, 53));
             byte[] data = new byte[4096];
             DatagramPacket answer = new DatagramPacket(data, data.length);
             socket.receive(answer);
