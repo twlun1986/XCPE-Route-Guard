@@ -4,6 +4,8 @@ import android.app.Activity;
 import android.content.Intent;
 import android.net.VpnService;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -26,7 +28,7 @@ public final class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(p, p, p, p);
         scroll.addView(root);
-        TextView heading = label(root, "XCPE Route Guard 0.2", 26);
+        TextView heading = label(root, "XCPE Route Guard 0.2.1", 26);
         heading.setFocusable(false);
         label(root, "Author: Nikaido Wei", 15);
         label(root, "LOCAL PROTECTION — works on any router. Published XCPE IPv4 destinations "
@@ -57,9 +59,16 @@ public final class MainActivity extends Activity {
             if (saveRules()) requestVpn();
         });
         button(root, "Stop protection").setOnClickListener(v -> {
-            startService(new Intent(this, GuardVpnService.class)
-                    .setAction(GuardVpnService.ACTION_STOP));
-            status.setText("Stopping... reopen app to verify");
+            // stopService terminates the existing VPN service without starting a
+            // second service command; the service closes its TUN in onDestroy().
+            getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(GuardVpnService.KEY_ENABLED, false).commit();
+            boolean wasRunning = stopService(new Intent(this, GuardVpnService.class));
+            status.setText(wasRunning ? "Stop requested; checking VPN state..." :
+                    "No running service; checking VPN state...");
+            // Android calls onDestroy asynchronously. Refresh after it executes.
+            new Handler(Looper.getMainLooper()).postDelayed(this::showStatus, 350);
+            new Handler(Looper.getMainLooper()).postDelayed(this::showStatus, 1000);
         });
         button(root, "Refresh status").setOnClickListener(v -> showStatus());
         label(root, "STATUS ICON: some Android TV launchers hide VPN/notification icons. "
@@ -110,9 +119,22 @@ public final class MainActivity extends Activity {
                     Toast.LENGTH_LONG).show();
             return;
         }
-        startForegroundService(new Intent(this, GuardVpnService.class)
-                .setAction(GuardVpnService.ACTION_START));
-        status.setText("Starting... select Refresh status");
+        if (!getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE).edit()
+                .putBoolean(GuardVpnService.KEY_ENABLED, true).commit()) {
+            Toast.makeText(this, "Unable to save VPN enable state", Toast.LENGTH_LONG).show();
+            return;
+        }
+        try {
+            startForegroundService(new Intent(this, GuardVpnService.class)
+                    .setAction(GuardVpnService.ACTION_START));
+            status.setText("Starting... select Refresh status");
+            new Handler(Looper.getMainLooper()).postDelayed(this::showStatus, 500);
+        } catch (RuntimeException e) {
+            getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(GuardVpnService.KEY_ENABLED, false).apply();
+            Toast.makeText(this, "Unable to start VPN: " + e.getMessage(), Toast.LENGTH_LONG).show();
+            showStatus();
+        }
     }
     @Override protected void onActivityResult(int req, int result, Intent data) {
         super.onActivityResult(req, result, data);
