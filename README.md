@@ -1,4 +1,4 @@
-# XCPE Route Guard v0.2.1 — offline IP + DNS containment
+# XCPE Route Guard v0.3.0 — offline IP + DNS containment
 
 **Author: Nikaido Wei**
 
@@ -30,7 +30,7 @@ Do **not** add `github.com` to the DNS list just because Google's report identif
 - Blocked domain suffixes return **NXDOMAIN**, without an upstream query.
 - Unblocked DNS queries are forwarded over UDP/53 only to the current physical network's configured IPv4 DNS server, with a short timeout.
 - Other video/web traffic stays on the original network and is not routed through the app.
-- No telemetry, automatic updates, remote management, remote code, file downloads or boot-start permissions.
+- No telemetry, automatic updates, remote management, remote code or file downloads. A BOOT_COMPLETED receiver is included strictly for a user-enabled restart.
 
 ### Limitations
 
@@ -54,10 +54,25 @@ Do **not** add `github.com` to the DNS list just because Google's report identif
 
 The GitHub workflow performs source pattern checks, local rule/DNS unit tests, APK compilation, and an APK permission inspection. Those checks do not replace device testing, independent security assessment or a full firmware cleanup.
 
-## Stop protection reliably (v0.2.1)
 
-- Tap **Stop protection**. The app now calls Android `stopService()` directly rather than sending a new start command with a STOP action.
-- The service shuts down its TUN descriptor, removes the foreground notification and sets its in-process status to INACTIVE. The on-screen status automatically refreshes.
-- An explicit user-enabled flag guards against unwanted `START_STICKY` restarts; the service now returns `START_NOT_STICKY`.
-- If the device reactivates a VPN due to firmware-specific Always-on settings, go to Android **Settings → Network & Internet → VPN** and turn off Always-on VPN / disconnect. On stripped-down TV firmware, **Settings → Apps → XCPE Route Guard → Force Stop** will terminate the old service.
-- This version contains source-level lifecycle checks in the CI pipeline. Stopping/starting on the physical SVI 10P has not been verified in a hardware test.
+## User-controlled Always-on behavior (v0.3.0)
+
+- **Start Protection** saves a local boolean preference `protection_enabled=true` and starts the local VPN. If Android kills the process, `START_STICKY` allows it to recover while enabled.
+- **Stop Protection** saves `false` and sends an explicit `ACTION_STOP` to the running VPN service. The service **immediately closes the TUN file descriptor**, drops the active state, cancels retry jobs, removes the foreground notification and then calls `stopSelf()`. This works even when Android's VPN binding delays `onDestroy()`.
+- A non-exported **BOOT_COMPLETED** and **MY_PACKAGE_REPLACED** receiver starts the foreground service *only* if the preference was previously enabled by the user.
+- If Wi-Fi/Ethernet is not ready after reboot, the visible service waits and retries every 12 seconds. It does not route traffic through a default VPN gateway and does not contact a cloud service.
+- If the Android VPN authorization was revoked or Android firmware blocks background start, open the app and approve the VPN again. Some TV-box firmware suppresses boot receivers or kills background apps.
+- The Android system **Always-on VPN** option, if available in Android Settings, provides stronger OS-enforced restart and can be used too. When configured, it may require disabling the system Always-on switch to stop the VPN permanently.
+- Keep **Block connections without VPN OFF**, because this selective-route VPN deliberately passes normal streaming traffic outside the tunnel.
+- Installing a debug-signed APK built on a new GitHub runner can fail signature verification. Back up custom rules and reinstall if Android rejects an upgrade.
+
+## Test sequence
+
+1. Install/upgrade to v0.3.0 through Emotn Remote Push.
+2. Tap **Start Protection**; verify **ACTIVE** and **Reboot restart: ON**.
+3. Tap **Stop Protection**; the screen should show **INACTIVE** and **Reboot restart: OFF**.
+4. Reopen the app and verify still INACTIVE. Reboot the TV box; verify it remains INACTIVE.
+5. Tap **Start Protection** again, verify ACTIVE, reboot, allow network initialization, then verify ACTIVE again.
+6. If the boot restart fails, inspect any firmware-specific **Autostart / Battery optimization** controls and Android's built-in VPN settings. Android TV firmware support varies.
+
+Only static logic checks and compilation are performed automatically; the SVI 10P's real OS/service behavior must still be verified on-device.
