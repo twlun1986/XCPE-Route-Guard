@@ -38,7 +38,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if grep -R -nE 'android.permission.RECEIVE_BOOT_COMPLETED|android.permission.REQUEST_INSTALL_PACKAGES|android.permission.QUERY_ALL_PACKAGES|android.permission.SYSTEM_ALERT_WINDOW|DexClassLoader|PathClassLoader|HttpURLConnection|HttpsURLConnection|ProcessBuilder|Runtime.getRuntime|WebView|WebSocket|new Socket\(' app/src/main; then
+          if grep -R -nE 'android.permission.REQUEST_INSTALL_PACKAGES|android.permission.QUERY_ALL_PACKAGES|android.permission.SYSTEM_ALERT_WINDOW|DexClassLoader|PathClassLoader|HttpURLConnection|HttpsURLConnection|ProcessBuilder|Runtime.getRuntime|WebView|WebSocket|new Socket\(' app/src/main; then
             echo 'Unapproved permission, dynamic loading or remote-command/network interface found' >&2
             exit 1
           fi
@@ -46,32 +46,44 @@ jobs:
           grep -q 'android.permission.BIND_VPN_SERVICE' app/src/main/AndroidManifest.xml
           grep -q 'android.permission.INTERNET' app/src/main/AndroidManifest.xml
           grep -q 'android.permission.ACCESS_NETWORK_STATE' app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.RECEIVE_BOOT_COMPLETED' app/src/main/AndroidManifest.xml
+          grep -q 'android.intent.action.BOOT_COMPLETED' app/src/main/AndroidManifest.xml
+          grep -q 'android:exported="false"' app/src/main/AndroidManifest.xml
+          grep -q 'StartupPolicy.mayAutoStart(enabled, intent.getAction())' app/src/main/java/org/local/xcpeguard/BootReceiver.java
           test "$(grep -R -l 'new DatagramSocket' app/src/main/java | wc -l)" -eq 1
           grep -q 'socket.connect(upstream.dns, 53)' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
 
-      - name: Enforce explicit VPN stop lifecycle
+      - name: Enforce immediate VPN teardown and user opt-in boot behavior
         shell: bash
         run: |
           set -euo pipefail
-          grep -q 'stopService(new Intent(this, GuardVpnService.class))' app/src/main/java/org/local/xcpeguard/MainActivity.java
+          # Stop must reach the running instance's onStartCommand and close the TUN,
+          # not rely on onDestroy() of a potentially bound VpnService.
+          grep -q 'setAction(GuardVpnService.ACTION_STOP)' app/src/main/java/org/local/xcpeguard/MainActivity.java
+          grep -q 'startService(new Intent(this, GuardVpnService.class)' app/src/main/java/org/local/xcpeguard/MainActivity.java
+          if grep -q 'stopService(new Intent(this, GuardVpnService.class))' app/src/main/java/org/local/xcpeguard/MainActivity.java; then
+            echo 'Do not use stopService-only shutdown' >&2
+            exit 1
+          fi
+          grep -q 'if (intent != null && ACTION_STOP.equals(intent.getAction()))' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
           grep -q 'private synchronized void shutdownProtection()' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
           grep -q 'stopForeground(STOP_FOREGROUND_REMOVE)' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
           grep -q 'fd.close()' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
-          grep -q 'return START_NOT_STICKY' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
-          if grep -q 'return START_STICKY;' app/src/main/java/org/local/xcpeguard/GuardVpnService.java; then
-            echo 'Sticky VPN restart is not permitted' >&2
-            exit 1
-          fi
+          # Sticky restart is explicitly gated by the persisted enabled flag.
+          grep -q 'return START_STICKY;' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
+          grep -q 'return START_NOT_STICKY;' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
+          grep -q 'getBoolean(KEY_ENABLED, false)' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
 
       - name: Unit tests for IP and domain rules and DNS replies
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .ci-test
-          javac -d .ci-test app/src/main/java/org/local/xcpeguard/IpRules.java app/src/main/java/org/local/xcpeguard/DomainRules.java app/src/main/java/org/local/xcpeguard/DnsPacket.java tests/RuleValidationTest.java tests/DomainRulesTest.java tests/DnsPacketTest.java
+          javac -d .ci-test app/src/main/java/org/local/xcpeguard/IpRules.java app/src/main/java/org/local/xcpeguard/DomainRules.java app/src/main/java/org/local/xcpeguard/DnsPacket.java tests/RuleValidationTest.java tests/DomainRulesTest.java tests/DnsPacketTest.java app/src/main/java/org/local/xcpeguard/StartupPolicy.java tests/StartupPolicyTest.java
           java -cp .ci-test RuleValidationTest
           java -cp .ci-test DomainRulesTest
           java -cp .ci-test DnsPacketTest
+          java -cp .ci-test StartupPolicyTest
 
       - name: Compile Android APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
@@ -88,7 +100,13 @@ jobs:
           grep -q 'android.permission.INTERNET' apk-permissions.txt
           grep -q 'android.permission.ACCESS_NETWORK_STATE' apk-permissions.txt
           grep -q 'android.permission.FOREGROUND_SERVICE' apk-permissions.txt
-          if grep -Eq 'android.permission.(RECEIVE_BOOT_COMPLETED|QUERY_ALL_PACKAGES|REQUEST_INSTALL_PACKAGES|SYSTEM_ALERT_WINDOW|BIND_ACCESSIBILITY_SERVICE)' apk-permissions.txt; then
+          grep -q 'android.permission.RECEIVE_BOOT_COMPLETED' apk-permissions.txt
+          # Exact permission allowlist: the only added permission is boot
+          # notification, used solely after the user opted into autostart.
+          sed -n "s/.*uses-permission: name='\\([^']*\\)'.*/\\1/p" apk-permissions.txt | sort -u > app-permissions-actual.txt
+          printf '%s\\n' android.permission.FOREGROUND_SERVICE android.permission.INTERNET android.permission.ACCESS_NETWORK_STATE android.permission.RECEIVE_BOOT_COMPLETED | sort > app-permissions-allowed.txt
+          diff -u app-permissions-allowed.txt app-permissions-actual.txt
+          if grep -Eq 'android.permission.(QUERY_ALL_PACKAGES|REQUEST_INSTALL_PACKAGES|SYSTEM_ALERT_WINDOW|BIND_ACCESSIBILITY_SERVICE)' apk-permissions.txt; then
             echo 'Extra dangerous permission detected' >&2
             exit 1
           fi
