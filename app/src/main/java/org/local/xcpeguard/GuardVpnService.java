@@ -13,6 +13,8 @@ import android.net.NetworkCapabilities;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.system.OsConstants;
 
@@ -36,6 +38,7 @@ import java.util.List;
 public final class GuardVpnService extends VpnService {
     public static final String ACTION_START = "org.local.xcpeguard.START";
     public static final String ACTION_STOP = "org.local.xcpeguard.STOP";
+    public static final String ACTION_BOOT = "org.local.xcpeguard.BOOT";
     public static final String PREFS = "guard";
     public static final String KEY_IPS = "ips";
     public static final String KEY_DOMAINS = "domains";
@@ -43,7 +46,10 @@ public final class GuardVpnService extends VpnService {
     public static final String KEY_BLOCKED_DNS = "blocked_dns";
     public static final String KEY_ENABLED = "protection_enabled";
     public static volatile boolean active = false;
-    private static final String CHANNEL = "xcpe_guard_status_v2";
+    private static final String CHANNEL = "xcpe_guard_status_v3";
+    private static final long NETWORK_RETRY_MS = 12000L;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private Runnable pendingRetry;
     private ParcelFileDescriptor tun;
     private volatile boolean stopping;
     private Thread readerThread;
@@ -52,49 +58,87 @@ public final class GuardVpnService extends VpnService {
     private List<String> domainRules;
 
     @Override public synchronized int onStartCommand(Intent intent, int flags, int startId) {
-        // An explicit user stop must close the VPN interface immediately.
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            // Android can keep a VpnService bound after stopSelf().
+            // Close the actual TUN interface here, not only in onDestroy().
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                     .putBoolean(KEY_ENABLED, false).commit();
             shutdownProtection();
             stopSelf();
             return START_NOT_STICKY;
         }
-        // START_STICKY must not silently restart a VPN the user stopped.
-        // A null Intent is permitted only for an intentionally enabled
-        // Android always-on VPN restart, never after a user-requested stop.
-        boolean enabled = getSharedPreferences(PREFS, MODE_PRIVATE)
-                .getBoolean(KEY_ENABLED, false);
-        boolean expectedAction = intent == null || ACTION_START.equals(intent.getAction());
-        if (!enabled || !expectedAction) {
+        // A sticky restart, boot or OS always-on start is allowed ONLY
+        // after the person explicitly pressed Start Protection.
+        if (!getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_ENABLED, false)) {
             shutdownProtection();
             stopSelf();
             return START_NOT_STICKY;
         }
+        stopping = false;
         createChannel();
+        startForeground(1, notification("STARTING: preparing IP + DNS protection"));
+        if (tun == null && pendingRetry == null) connectOrRetry();
+        return START_STICKY;
+    }
+
+    private Notification notification(String state) {
         PendingIntent openUi = PendingIntent.getActivity(this, 0,
                 new Intent(this, MainActivity.class),
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
-        Notification n = new Notification.Builder(this, CHANNEL)
+        return new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_guard_status)
-                .setContentTitle("XCPE Route Guard ACTIVE")
-                .setContentText("Local IP and DNS protection | Nikaido Wei")
+                .setContentTitle("XCPE Route Guard by Nikaido Wei")
+                .setContentText(state)
                 .setContentIntent(openUi)
                 .setOngoing(true)
+                .setOnlyAlertOnce(true)
                 .build();
-        startForeground(1, n);
-        if (tun == null) {
-            try {
-                startProtection();
-            } catch (Exception e) {
-                active = false;
+    }
+
+    private void updateNotification(String state) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) manager.notify(1, notification(state));
+    }
+
+    private synchronized void connectOrRetry() {
+        pendingRetry = null;
+        if (stopping || tun != null || !getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_ENABLED, false)) return;
+        try {
+            if (VpnService.prepare(this) != null) {
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                        .putString("error", e.getClass().getSimpleName() + ": " + e.getMessage()).apply();
+                        .putString("error", "VPN permission missing: open the app to approve").apply();
+                shutdownProtection();
                 stopSelf();
-                return START_NOT_STICKY;
+                return;
             }
+            if (selectUpstream() == null) {
+                updateNotification("WAITING: physical network DNS not ready");
+                scheduleNetworkRetry();
+                return;
+            }
+            startProtection();
+            updateNotification("ACTIVE: IP and local DNS blocking");
+        } catch (Exception e) {
+            active = false;
+            // An unsuccessful VPN setup must not retain a partial tunnel.
+            ParcelFileDescriptor failed = tun;
+            tun = null;
+            if (failed != null) try { failed.close(); } catch (IOException ignored) {}
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString("error", e.getClass().getSimpleName() +
+                            ": " + e.getMessage()).apply();
+            updateNotification("WAITING: retrying VPN and network setup");
+            scheduleNetworkRetry();
         }
-        return START_NOT_STICKY;
+    }
+
+    private synchronized void scheduleNetworkRetry() {
+        if (stopping || pendingRetry != null || !getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getBoolean(KEY_ENABLED, false)) return;
+        pendingRetry = this::connectOrRetry;
+        mainHandler.postDelayed(pendingRetry, NETWORK_RETRY_MS);
     }
 
     private void createChannel() {
@@ -188,7 +232,20 @@ public final class GuardVpnService extends VpnService {
                     .putString("error", e.toString()).apply();
         } finally {
             persist();
-            active = false;
+            if (!stopping && readerThread == Thread.currentThread()) {
+                active = false;
+                readerThread = null;
+                ParcelFileDescriptor fd = tun;
+                tun = null;
+                if (fd != null) try { fd.close(); } catch (IOException ignored) {}
+                mainHandler.post(() -> {
+                    if (getSharedPreferences(PREFS, MODE_PRIVATE)
+                            .getBoolean(KEY_ENABLED, false)) {
+                        updateNotification("WAITING: restoring the local VPN");
+                        scheduleNetworkRetry();
+                    }
+                });
+            }
         }
     }
 
@@ -219,13 +276,20 @@ public final class GuardVpnService extends VpnService {
                 .putLong(KEY_BLOCKED_DNS, blockedDns).apply();
     }
 
-    /** Release the TUN and foreground notification independent of the packet thread. */
+    /** Release the actual VPN interface, even when the service remains bound. */
     private synchronized void shutdownProtection() {
         stopping = true;
         active = false;
+        if (pendingRetry != null) {
+            mainHandler.removeCallbacks(pendingRetry);
+            pendingRetry = null;
+        }
+        Thread oldReader = readerThread;
+        readerThread = null;
         ParcelFileDescriptor fd = tun;
         tun = null;
         if (fd != null) try { fd.close(); } catch (IOException ignored) {}
+        if (oldReader != null) oldReader.interrupt();
         stopForeground(STOP_FOREGROUND_REMOVE);
     }
 
