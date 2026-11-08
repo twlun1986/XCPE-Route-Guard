@@ -13,52 +13,56 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
-      - name: Checkout source (no stored GitHub credentials)
+      - name: Checkout
         uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Setup maintained JDK 17
+      - name: Java 17
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK (no obsolete tools package)
+      - name: Android SDK
         uses: android-actions/setup-android@v4
         with:
           packages: 'platform-tools'
 
-      - name: Setup Gradle 8.9
+      - name: Gradle 8.9
         uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: '8.9'
 
-      - name: Security guardrails - deny network and dangerous code
+      - name: Review dangerous permissions and remote-code capabilities
         shell: bash
         run: |
           set -euo pipefail
-          test -f app/src/main/AndroidManifest.xml
-          if grep -R -nE 'android.permission.INTERNET|android.permission.RECEIVE_BOOT_COMPLETED|android.permission.REQUEST_INSTALL_PACKAGES|android.permission.QUERY_ALL_PACKAGES|DexClassLoader|PathClassLoader|java.net.|HttpURLConnection|ProcessBuilder|Runtime.getRuntime|WebView|WebSocket' app/src/main; then
-            echo 'Unapproved networking, dynamic execution, package-install or boot permission found' >&2
+          if grep -R -nE 'android.permission.RECEIVE_BOOT_COMPLETED|android.permission.REQUEST_INSTALL_PACKAGES|android.permission.QUERY_ALL_PACKAGES|android.permission.SYSTEM_ALERT_WINDOW|DexClassLoader|PathClassLoader|HttpURLConnection|HttpsURLConnection|ProcessBuilder|Runtime.getRuntime|WebView|WebSocket|new Socket\(' app/src/main; then
+            echo 'Unapproved permission, dynamic loading or remote-command/network interface found' >&2
             exit 1
           fi
-          grep -q 'android.permission.BIND_VPN_SERVICE' app/src/main/AndroidManifest.xml
           grep -q 'android:allowBackup="false"' app/src/main/AndroidManifest.xml
-          echo 'Source permission and network checks passed'
+          grep -q 'android.permission.BIND_VPN_SERVICE' app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.INTERNET' app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.ACCESS_NETWORK_STATE' app/src/main/AndroidManifest.xml
+          test "$(grep -R -l 'new DatagramSocket' app/src/main/java | wc -l)" -eq 1
+          grep -q 'socket.connect(upstream.dns, 53)' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
 
-      - name: Test IPv4 rule parser
+      - name: Unit tests for IP and domain rules and DNS replies
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .ci-test
-          javac -d .ci-test app/src/main/java/org/local/xcpeguard/IpRules.java tests/RuleValidationTest.java
+          javac -d .ci-test app/src/main/java/org/local/xcpeguard/IpRules.java app/src/main/java/org/local/xcpeguard/DomainRules.java app/src/main/java/org/local/xcpeguard/DnsPacket.java tests/RuleValidationTest.java tests/DomainRulesTest.java tests/DnsPacketTest.java
           java -cp .ci-test RuleValidationTest
+          java -cp .ci-test DomainRulesTest
+          java -cp .ci-test DnsPacketTest
 
       - name: Compile Android APK
         run: gradle :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Verify APK permissions and checksum
+      - name: Inspect built permissions and compute SHA-256
         shell: bash
         run: |
           set -euo pipefail
@@ -67,14 +71,16 @@ jobs:
           AAPT=$(find "$ANDROID_HOME/build-tools" -maxdepth 2 -type f -name aapt | sort -V | tail -n 1)
           test -n "$AAPT"
           "$AAPT" dump permissions "$APK" | tee apk-permissions.txt
-          if grep -q 'android.permission.INTERNET' apk-permissions.txt; then
-            echo 'Security check FAILED: APK declares INTERNET permission' >&2
+          grep -q 'android.permission.INTERNET' apk-permissions.txt
+          grep -q 'android.permission.ACCESS_NETWORK_STATE' apk-permissions.txt
+          grep -q 'android.permission.FOREGROUND_SERVICE' apk-permissions.txt
+          if grep -Eq 'android.permission.(RECEIVE_BOOT_COMPLETED|QUERY_ALL_PACKAGES|REQUEST_INSTALL_PACKAGES|SYSTEM_ALERT_WINDOW|BIND_ACCESSIBILITY_SERVICE)' apk-permissions.txt; then
+            echo 'Extra dangerous permission detected' >&2
             exit 1
           fi
           sha256sum "$APK" | tee app-debug.apk.sha256
-          echo 'Verified APK has no INTERNET permission'
 
-      - name: Upload tested APK
+      - name: Publish verified APK artifact
         uses: actions/upload-artifact@v7
         with:
           name: XCPE-Route-Guard-APK
