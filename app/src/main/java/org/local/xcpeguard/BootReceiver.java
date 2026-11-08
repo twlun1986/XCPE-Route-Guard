@@ -12,14 +12,11 @@ import android.content.Intent;
 public final class BootReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context, Intent intent) {
         if (intent == null) return;
-        String action = intent.getAction();
-        if (!Intent.ACTION_BOOT_COMPLETED.equals(action) &&
-                !Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) return;
-
-        // Important: the default is OFF. Explicit Stop writes false; reboot
-        // must never enable protection without the user's saved choice.
-        if (!context.getSharedPreferences(GuardVpnService.PREFS, Context.MODE_PRIVATE)
-                .getBoolean(GuardVpnService.KEY_ENABLED, false)) return;
+        // Important: default OFF. Explicit Stop writes false; boot never
+        // turns protection back on without the user's saved consent.
+        boolean enabled = context.getSharedPreferences(GuardVpnService.PREFS,
+                Context.MODE_PRIVATE).getBoolean(GuardVpnService.KEY_ENABLED, false);
+        if (!StartupPolicy.mayAutoStart(enabled, intent.getAction())) return;
         try {
             context.startForegroundService(new Intent(context, GuardVpnService.class)
                     .setAction(GuardVpnService.ACTION_BOOT));
