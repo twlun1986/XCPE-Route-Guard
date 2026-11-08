@@ -19,6 +19,13 @@ public final class MainActivity extends Activity {
     private TextView status;
     private EditText addresses;
     private EditText domains;
+    private final Handler refreshHandler = new Handler(Looper.getMainLooper());
+    private final Runnable refreshLoop = new Runnable() {
+        @Override public void run() {
+            showStatus();
+            refreshHandler.postDelayed(this, 2000);
+        }
+    };
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
@@ -28,7 +35,7 @@ public final class MainActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setPadding(p, p, p, p);
         scroll.addView(root);
-        TextView heading = label(root, "XCPE Route Guard 0.2.1", 26);
+        TextView heading = label(root, "XCPE Route Guard 0.3.0", 26);
         heading.setFocusable(false);
         label(root, "Author: Nikaido Wei", 15);
         label(root, "LOCAL PROTECTION — works on any router. Published XCPE IPv4 destinations "
@@ -59,18 +66,32 @@ public final class MainActivity extends Activity {
             if (saveRules()) requestVpn();
         });
         button(root, "Stop protection").setOnClickListener(v -> {
-            // stopService terminates the existing VPN service without starting a
-            // second service command; the service closes its TUN in onDestroy().
-            getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE).edit()
-                    .putBoolean(GuardVpnService.KEY_ENABLED, false).commit();
-            boolean wasRunning = stopService(new Intent(this, GuardVpnService.class));
-            status.setText(wasRunning ? "Stop requested; checking VPN state..." :
-                    "No running service; checking VPN state...");
-            // Android calls onDestroy asynchronously. Refresh after it executes.
-            new Handler(Looper.getMainLooper()).postDelayed(this::showStatus, 350);
-            new Handler(Looper.getMainLooper()).postDelayed(this::showStatus, 1000);
+            // This must call onStartCommand(ACTION_STOP) of the running VPN
+            // rather than merely requesting service destruction: Android may
+            // keep the VPN service bound and skip onDestroy for some time.
+            if (!getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(GuardVpnService.KEY_ENABLED, false).commit()) {
+                Toast.makeText(this, "Unable to save Stop preference", Toast.LENGTH_LONG).show();
+                return;
+            }
+            try {
+                startService(new Intent(this, GuardVpnService.class)
+                        .setAction(GuardVpnService.ACTION_STOP));
+                status.setText("STOP REQUESTED: releasing local VPN...");
+                refreshHandler.postDelayed(this::showStatus, 200);
+                refreshHandler.postDelayed(this::showStatus, 850);
+            } catch (RuntimeException e) {
+                Toast.makeText(this, "Stop request failed: " + e.getMessage(),
+                        Toast.LENGTH_LONG).show();
+                showStatus();
+            }
         });
         button(root, "Refresh status").setOnClickListener(v -> showStatus());
+        label(root, "AUTO-START: after Start Protection, the app remembers your choice and " +
+                "attempts to resume following Android BOOT_COMPLETED, package updates or " +
+                "system service restarts. Stop Protection disables this. If the TV firmware " +
+                "blocks background startup, check Android VPN Always-on or the box's " +
+                "Autostart/Battery restrictions. Never enable Block connections without VPN.", 14);
         label(root, "STATUS ICON: some Android TV launchers hide VPN/notification icons. "
                 + "Check ACTIVE above or the persistent notification. Keep 'Block connections "
                 + "without VPN' disabled. Only one Android VPN can run at a time.", 14);
@@ -144,7 +165,12 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onResume() {
         super.onResume();
-        showStatus();
+        refreshHandler.removeCallbacks(refreshLoop);
+        refreshHandler.post(refreshLoop);
+    }
+    @Override protected void onPause() {
+        refreshHandler.removeCallbacks(refreshLoop);
+        super.onPause();
     }
     private void showStatus() {
         String err = getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE)
@@ -153,7 +179,12 @@ public final class MainActivity extends Activity {
                 .getLong(GuardVpnService.KEY_TOTAL, 0);
         long blocked = getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE)
                 .getLong(GuardVpnService.KEY_BLOCKED_DNS, 0);
-        status.setText((GuardVpnService.active ? "ACTIVE" : "INACTIVE") +
+        boolean enabled = getSharedPreferences(GuardVpnService.PREFS, MODE_PRIVATE)
+                .getBoolean(GuardVpnService.KEY_ENABLED, false);
+        String state = GuardVpnService.active ? "ACTIVE" :
+                (enabled ? "WAITING/INACTIVE (auto-start enabled)" : "INACTIVE");
+        status.setText(state +
+                " | Reboot restart: " + (enabled ? "ON" : "OFF") +
                 " | Dropped IP packets: " + drops +
                 " | Blocked DNS: " + blocked +
                 (err == null ? "" : " | Error: " + err));
