@@ -104,7 +104,7 @@ jobs:
           # Exact permission allowlist: the only added permission is boot
           # notification, used solely after the user opted into autostart.
           sed -n "s/.*uses-permission: name='\\([^']*\\)'.*/\\1/p" apk-permissions.txt | sort -u > app-permissions-actual.txt
-          printf '%s\\n' android.permission.FOREGROUND_SERVICE android.permission.INTERNET android.permission.ACCESS_NETWORK_STATE android.permission.RECEIVE_BOOT_COMPLETED | sort > app-permissions-allowed.txt
+          printf '%s\n' android.permission.FOREGROUND_SERVICE android.permission.INTERNET android.permission.ACCESS_NETWORK_STATE android.permission.RECEIVE_BOOT_COMPLETED | sort > app-permissions-allowed.txt
           diff -u app-permissions-allowed.txt app-permissions-actual.txt
           if grep -Eq 'android.permission.(QUERY_ALL_PACKAGES|REQUEST_INSTALL_PACKAGES|SYSTEM_ALERT_WINDOW|BIND_ACCESSIBILITY_SERVICE)' apk-permissions.txt; then
             echo 'Extra dangerous permission detected' >&2
