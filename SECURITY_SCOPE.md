@@ -11,7 +11,7 @@
 
 ## Explicitly absent
 - No telemetry, cloud control plane, periodic rule update, account registration, proxy network or remote access.
-- No APK downloader, script execution, shell commands, root/ADB interactions, dynamic code loading, accessibility automation, boot receiver, or silent package installs.
+- No APK downloader, script execution, shell commands, root/ADB interactions, dynamic code loading, accessibility automation, or silent package installs.
 - No attempt to intercept or proxy ordinary streaming media packets.
 - No blanket GitHub/filemail/ip-api/Google STUN blocking: shared legitimate infrastructure could be disrupted.
 - No DoH/DoT support.
@@ -27,3 +27,11 @@
 - Sources are plain Java and Android vector XML, no third-party SDKs.
 - The workflow rejects known dangerous permissions and obvious dynamic-execution network patterns; this is a guardrail, **not a formal code audit**.
 - APK permission output and SHA-256 accompany each GitHub Actions artifact.
+
+## Explicitly user-enabled reboot persistence (v0.3.0)
+
+- The Android manifest declares `RECEIVE_BOOT_COMPLETED` only to restore the protective service after the user has previously pressed Start Protection.
+- The non-exported `BootReceiver` is limited to `BOOT_COMPLETED` and `MY_PACKAGE_REPLACED` and validates `StartupPolicy.mayAutoStart(enabled, action)`.
+- Pressing Stop flips that saved flag OFF; the service closes its VPN interface immediately and cannot restart protection without a new manual Start.
+- The service is foreground and observable; it has no auto-update, remote command, data exfiltration, shell execution or permission escalation.
+- Android TV vendor firmware may independently prevent or force-restart system VPNs. This user-space app is not a substitute for a verified clean firmware.
