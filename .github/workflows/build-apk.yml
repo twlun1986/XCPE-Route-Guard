@@ -49,6 +49,20 @@ jobs:
           test "$(grep -R -l 'new DatagramSocket' app/src/main/java | wc -l)" -eq 1
           grep -q 'socket.connect(upstream.dns, 53)' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
 
+      - name: Enforce explicit VPN stop lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'stopService(new Intent(this, GuardVpnService.class))' app/src/main/java/org/local/xcpeguard/MainActivity.java
+          grep -q 'private synchronized void shutdownProtection()' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
+          grep -q 'stopForeground(STOP_FOREGROUND_REMOVE)' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
+          grep -q 'fd.close()' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
+          grep -q 'return START_NOT_STICKY' app/src/main/java/org/local/xcpeguard/GuardVpnService.java
+          if grep -q 'return START_STICKY;' app/src/main/java/org/local/xcpeguard/GuardVpnService.java; then
+            echo 'Sticky VPN restart is not permitted' >&2
+            exit 1
+          fi
+
       - name: Unit tests for IP and domain rules and DNS replies
         shell: bash
         run: |
