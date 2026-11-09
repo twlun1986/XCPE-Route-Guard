@@ -2,7 +2,7 @@
 
 **Author: Nikaido Wei**
 
-This source builds a **device-local** Android TV VPN utility for the SVI 10P and other compatible Android devices (Android 8+). It does not rely on an ASUS/TP-Link/OpenWrt router, and does not require root or ADB. It is **containment, not malware removal**.
+This source builds a **device-local** Android TV VPN utility for the SVI 10P and other compatible Android devices (Android 8+). It does not rely on external router for IP connection blocking requirement, and does not require root or ADB. It is **containment, not malware removal**.
 
 ## Blocklists (locally bundled; editable within the app)
 
